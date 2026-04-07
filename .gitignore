@@ -9,6 +9,12 @@ __pycache__/
 # FAISS vector store (rebuilt at runtime)
 vectorstore/
 
+# Knowledge base docs (uploaded at runtime)
+knowledge_base/
+
+# Interview session logs
+Interviews/
+
 # Virtual environment
 venv/
 .venv/

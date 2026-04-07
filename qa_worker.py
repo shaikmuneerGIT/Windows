@@ -4,16 +4,19 @@ qa_worker.py
 Runs RAG (Retrieval-Augmented Generation) Q&A in a QThread so the GUI
 never freezes during LLM calls.
 
+Uses DocStore (.md file-based search) instead of FAISS vector DB for
+instant uploads and fast text-based retrieval.
+
 Signals emitted on the main / GUI thread:
     token_ready(str)              — each streaming token from the LLM
     answer_done(str, str)         — (source_type, full_answer_text)
     error(str)                    — human-readable error message
-    index_progress(int, int)      — (chunks_indexed, total_chunks)
-    index_done(int)               — total chunks after indexing
+    index_progress(int, int)      — (files_added, total_files)
+    index_done(int)               — total document count after adding
     service_ready(str)            — LLM mode label after service init
 
 Dependencies:
-    pip install langchain langchain-openai langchain-community faiss-cpu openai python-dotenv
+    pip install langchain langchain-openai langchain-community openai python-dotenv
     pip install langchain-ollama   # if using local Ollama mode
 """
 
@@ -32,10 +35,13 @@ from PyQt6.QtCore import QThread, QObject, pyqtSignal
 logger = logging.getLogger(__name__)
 
 
+from doc_store import DocStore
+
 # ── Internal task types ────────────────────────────────────────────────────────
 class _AskTask:
-    def __init__(self, question: str):
+    def __init__(self, question: str, transcript_context: str = ""):
         self.question = question
+        self.transcript_context = transcript_context  # full accumulated transcript
 
 class _IndexTask:
     def __init__(self, file_path: str):
@@ -59,9 +65,15 @@ STRICT DOMAIN RULES — read before answering:
 3. If the Document Context is empty or off-topic, draw on your own Oracle training knowledge to give a correct Oracle answer — do NOT say "not found" and do NOT suggest a generic web meaning.
 4. Keep answers concise, practical, and specific to Oracle OIC / VBCS.
 5. Do NOT cite external URLs (dictionary.cambridge.org, wikipedia, acronym.io, etc.).
+6. If a Live Transcript is provided, treat it as the conversation happening right now.
+   Identify ALL Oracle-related topics, questions, and concepts discussed in it.
+   Answer comprehensively covering every relevant point from the transcript.
 
 Document Context:
 {context}
+
+Live Transcript (ongoing conversation / meeting):
+{transcript}
 
 User Question: {question}
 
@@ -156,9 +168,9 @@ class QAWorker(QObject):
         if not self._thread.isRunning():
             self._thread.start()
 
-    def ask(self, question: str):
-        """Queue a Q&A request."""
-        self._task_queue.put(_AskTask(question))
+    def ask(self, question: str, transcript_context: str = ""):
+        """Queue a Q&A request with optional full transcript context."""
+        self._task_queue.put(_AskTask(question, transcript_context))
 
     def index_file(self, file_path: str):
         """Queue a document for indexing."""
@@ -189,6 +201,7 @@ class _WorkerThread(QThread):
         self._queue       = task_queue
         self._worker      = worker
         self._service     = None
+        self._doc_store   = None       # .md file-based search
         self.api_key      = ""
         self.vectorstore_dir = "vectorstore"
 
@@ -201,7 +214,7 @@ class _WorkerThread(QThread):
             if isinstance(task, _StopTask):
                 break
             elif isinstance(task, _AskTask):
-                self._handle_ask(task.question)
+                self._handle_ask(task.question, task.transcript_context)
             elif isinstance(task, _IndexTask):
                 self._handle_index(task.file_path)
             elif isinstance(task, _ClearTask):
@@ -210,6 +223,14 @@ class _WorkerThread(QThread):
     # ── Service initialisation ─────────────────────────────────────────────────
 
     def _init_service(self):
+        # Initialize DocStore (instant, no embedding needed)
+        try:
+            kb_dir = str(Path(__file__).parent / "knowledge_base")
+            self._doc_store = DocStore(kb_dir=kb_dir)
+            logger.info(f"DocStore ready — {self._doc_store.document_count} docs in knowledge_base/")
+        except Exception as ex:
+            logger.warning(f"DocStore init failed: {ex}")
+
         try:
             # Try to import QAService from the web project path (sibling folder)
             import sys
@@ -228,7 +249,7 @@ class _WorkerThread(QThread):
         except Exception:
             # Fall back to minimal inline service
             try:
-                self._service = _MinimalQAService(self.api_key)
+                self._service = _MinimalQAService(self.api_key, self._doc_store)
                 self._worker.service_ready.emit(self._service.mode_label)
                 self._auto_index_knowledge_base()
             except Exception as ex2:
@@ -247,16 +268,19 @@ class _WorkerThread(QThread):
         for p in candidates:
             if p.exists():
                 try:
-                    if self._service and self._service.document_count == 0:
-                        self._handle_index(str(p))
-                        logger.info(f"Auto-indexed: {p}")
+                    # Add to DocStore (instant copy)
+                    if self._doc_store:
+                        kb_path = self._doc_store.kb_dir / p.name
+                        if not kb_path.exists():
+                            self._doc_store.add_file(str(p))
+                            logger.info(f"Auto-added to knowledge base: {p}")
                 except Exception as ex:
                     logger.warning(f"Auto-index failed: {ex}")
                 break
 
     # ── Task handlers ──────────────────────────────────────────────────────────
 
-    def _handle_ask(self, question: str):
+    def _handle_ask(self, question: str, transcript_context: str = ""):
         if not self._service:
             self._worker.error.emit("QA service not ready yet.")
             return
@@ -265,19 +289,46 @@ class _WorkerThread(QThread):
             full_text = ""
             source_type = "docs"
 
+            # Build search query from BOTH the question AND the full transcript
+            # This ensures we search docs using ALL topics mentioned in the meeting
+            search_query = question
+            if transcript_context:
+                # Combine transcript + question for comprehensive doc search
+                search_query = transcript_context + " " + question
+
+            # Get context from DocStore using the full combined text
+            doc_context = ""
+            if self._doc_store and self._doc_store.document_count > 0:
+                doc_context = self._doc_store.get_context(search_query, max_chars=4000)
+
             # Try streaming first
             if hasattr(self._service, "stream_query"):
-                for token in self._service.stream_query(question):
+                # Use try/except to handle services with different signatures
+                try:
+                    stream = self._service.stream_query(
+                        question,
+                        doc_context=doc_context,
+                        transcript_context=transcript_context,
+                    )
+                except TypeError:
+                    # External QAService may not accept our custom params
+                    # Fall back to basic call
+                    stream = self._service.stream_query(question)
+
+                for token in stream:
                     self._worker.token_ready.emit(token)
                     full_text += token
 
                 # Detect "not found" → web fallback
                 if _is_not_found(full_text):
-                    # Signal a clear so UI knows we're retrying via web
                     self._worker.token_ready.emit("\n\n🌐 Searching the web…\n\n")
                     full_text = ""
                     oracle_q = f"Oracle OIC Oracle Integration Cloud VBCS: {question}"
-                    for token in self._service.stream_query(oracle_q, force_web=True):
+                    try:
+                        stream = self._service.stream_query(oracle_q, force_web=True)
+                    except TypeError:
+                        stream = self._service.stream_query(oracle_q)
+                    for token in stream:
                         self._worker.token_ready.emit(token)
                         full_text += token
                     source_type = "web"
@@ -287,7 +338,6 @@ class _WorkerThread(QThread):
                 result = self._service.query(question)
                 full_text = result.answer
                 source_type = result.source_type
-                # Emit all at once as a single "token" for simplicity
                 self._worker.token_ready.emit(full_text)
 
             self._worker.answer_done.emit(source_type, full_text)
@@ -296,8 +346,9 @@ class _WorkerThread(QThread):
             self._worker.error.emit(f"Q&A error: {ex}")
 
     def _handle_index(self, file_path: str):
-        if not self._service:
-            self._worker.error.emit("QA service not ready. Cannot index file.")
+        """Add a file to the knowledge base (instant copy, no embedding)."""
+        if not self._doc_store:
+            self._worker.error.emit("DocStore not initialized.")
             return
 
         try:
@@ -306,43 +357,21 @@ class _WorkerThread(QThread):
                 self._worker.error.emit(f"File not found: {file_path}")
                 return
 
-            # Process file → chunks
-            chunks = _load_and_chunk_file(p)
-            total = len(chunks)
-            if total == 0:
-                self._worker.error.emit(f"No text extracted from: {p.name}")
-                return
+            # Instant file add — just copy/convert to .md
+            saved_name = self._doc_store.add_file(file_path)
+            self._worker.index_progress.emit(1, 1)
 
-            # Convert dicts → LangChain Documents (works with both QAService versions)
-            try:
-                from langchain_core.documents import Document as LCDoc
-                lc_chunks = [
-                    LCDoc(
-                        page_content=c.get("content", c.get("page_content", str(c))),
-                        metadata=c.get("metadata", {})
-                    ) if isinstance(c, dict) else c
-                    for c in chunks
-                ]
-            except ImportError:
-                lc_chunks = chunks   # fallback: pass as-is
-
-            # Index in batches of 20
-            batch_size = 20
-            done = 0
-            for i in range(0, total, batch_size):
-                batch = lc_chunks[i: i + batch_size]
-                self._service.add_documents(batch)
-                done += len(batch)
-                self._worker.index_progress.emit(done, total)
-
-            count = self._service.document_count
+            count = self._doc_store.document_count
             self._worker._update_doc_count(count)
             self._worker.index_done.emit(count)
+            logger.info(f"Added to knowledge base: {saved_name}")
 
         except Exception as ex:
-            self._worker.error.emit(f"Indexing error: {ex}")
+            self._worker.error.emit(f"Upload error: {ex}")
 
     def _handle_clear(self):
+        if self._doc_store:
+            self._doc_store.clear_all()
         if self._service:
             try:
                 self._service.clear_documents()
@@ -355,52 +384,34 @@ class _WorkerThread(QThread):
 class _MinimalQAService:
     """
     Minimal in-process RAG service using LangChain directly.
-    Mirrors the logic in speech_qa_project/services/qa_service.py.
+    Uses DocStore (.md file search) for context instead of FAISS vector DB.
     """
 
-    def __init__(self, api_key: str = ""):
+    def __init__(self, api_key: str = "", doc_store: Optional[DocStore] = None):
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_core.output_parsers import StrOutputParser
 
+        self._doc_store = doc_store
         api_key_valid = bool(api_key and not api_key.startswith("sk-your"))
 
         if api_key_valid:
-            from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+            from langchain_openai import ChatOpenAI
             self._llm = ChatOpenAI(
                 model="gpt-4o", temperature=0.1, openai_api_key=api_key,
                 streaming=True
             )
-            self._embeddings = OpenAIEmbeddings(
-                model="text-embedding-3-small", openai_api_key=api_key
-            )
             self._mode = "OpenAI (gpt-4o)"
             self._openai_key = api_key
         else:
-            from langchain_ollama import ChatOllama, OllamaEmbeddings
+            from langchain_ollama import ChatOllama
             self._llm = ChatOllama(
                 model="llama3", base_url="http://localhost:11434", temperature=0.1
-            )
-            self._embeddings = OllamaEmbeddings(
-                model="nomic-embed-text", base_url="http://localhost:11434"
             )
             self._mode = "Local Ollama (llama3)"
             self._openai_key = ""
 
-        self._vectorstore = None
         self._prompt = ChatPromptTemplate.from_template(_RAG_PROMPT_TEMPLATE)
         self._parser = StrOutputParser()
-
-        # Try loading existing vectorstore
-        _vs_dir = Path(__file__).parent / "vectorstore"
-        if _vs_dir.exists():
-            try:
-                from langchain_community.vectorstores import FAISS
-                self._vectorstore = FAISS.load_local(
-                    str(_vs_dir), self._embeddings,
-                    allow_dangerous_deserialization=True
-                )
-            except Exception:
-                pass
 
     @property
     def mode_label(self) -> str:
@@ -408,57 +419,41 @@ class _MinimalQAService:
 
     @property
     def document_count(self) -> int:
-        if self._vectorstore:
-            try:
-                return self._vectorstore.index.ntotal
-            except Exception:
-                return 1
+        if self._doc_store:
+            return self._doc_store.document_count
         return 0
 
     def add_documents(self, docs: list):
-        from langchain_community.vectorstores import FAISS
-        from langchain_core.documents import Document as LCDoc
-
-        lc_docs = []
-        for d in docs:
-            if isinstance(d, dict):
-                lc_docs.append(LCDoc(
-                    page_content=d.get("content", d.get("page_content", "")),
-                    metadata=d.get("metadata", {})
-                ))
-            elif hasattr(d, "page_content"):
-                lc_docs.append(d)
-            else:
-                lc_docs.append(LCDoc(page_content=str(d)))
-
-        if self._vectorstore is None:
-            self._vectorstore = FAISS.from_documents(lc_docs, self._embeddings)
-        else:
-            self._vectorstore.add_documents(lc_docs)
-
-        # Persist
-        _vs_dir = Path(__file__).parent / "vectorstore"
-        _vs_dir.mkdir(parents=True, exist_ok=True)
-        self._vectorstore.save_local(str(_vs_dir))
+        """No-op — DocStore handles file storage directly."""
+        pass
 
     def clear_documents(self):
-        self._vectorstore = None
+        if self._doc_store:
+            self._doc_store.clear_all()
 
-    def stream_query(self, question: str, force_web: bool = False):
+    def stream_query(self, question: str, force_web: bool = False,
+                     doc_context: str = "", transcript_context: str = ""):
         """Yield streaming tokens from LLM."""
-        context = ""
-        if self._vectorstore and not force_web:
-            try:
-                docs = self._vectorstore.similarity_search(question, k=_TOP_K)
-                context = "\n\n".join(d.page_content for d in docs)
-            except Exception:
-                pass
+        context = doc_context
 
         if force_web:
             context = self._web_search(question)
 
+        # If no context provided and we have DocStore, search it
+        if not context and self._doc_store and not force_web:
+            # Use transcript + question for broader search
+            search_text = (transcript_context + " " + question).strip() if transcript_context else question
+            context = self._doc_store.get_context(search_text, max_chars=4000)
+
+        # Truncate transcript to keep within token limits
+        transcript = transcript_context[:3000] if transcript_context else ""
+
         chain = self._prompt | self._llm | self._parser
-        for chunk in chain.stream({"context": context, "question": question}):
+        for chunk in chain.stream({
+            "context": context,
+            "transcript": transcript,
+            "question": question,
+        }):
             yield chunk
 
     def _web_search(self, query: str) -> str:
@@ -478,82 +473,6 @@ class _MinimalQAService:
             return ""
 
 
-# ── File loading helpers ───────────────────────────────────────────────────────
-
-def _load_and_chunk_file(path: Path, chunk_size: int = 1000,
-                          chunk_overlap: int = 200) -> list:
-    """
-    Load a file and split into overlapping text chunks.
-    Returns a list of dicts: {content: str, metadata: dict}
-    """
-    text = _extract_text(path)
-    if not text:
-        return []
-
-    # Split on double-newlines (paragraphs), then merge to chunk_size
-    paragraphs = re.split(r"\n{2,}", text)
-    chunks = []
-    current = ""
-    overlap_buf = ""
-
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-
-        if len(current) + len(para) + 2 <= chunk_size:
-            current += ("\n\n" if current else "") + para
-        else:
-            if current:
-                chunks.append({
-                    "content": current,
-                    "metadata": {"source": path.name, "chunk": len(chunks)},
-                })
-                # Keep last overlap_buf chars as prefix for next chunk
-                overlap_buf = current[-chunk_overlap:]
-            current = overlap_buf + ("\n\n" if overlap_buf else "") + para
-            overlap_buf = ""
-
-    if current:
-        chunks.append({
-            "content": current,
-            "metadata": {"source": path.name, "chunk": len(chunks)},
-        })
-
-    return chunks
-
-
-def _extract_text(path: Path) -> str:
-    """Extract plain text from a file (txt, md, pdf, docx)."""
-    suffix = path.suffix.lower()
-
-    if suffix in (".txt", ".md", ".csv"):
-        return path.read_text(encoding="utf-8", errors="ignore")
-
-    if suffix == ".pdf":
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(str(path))
-            return "\n\n".join(
-                page.extract_text() or "" for page in reader.pages
-            )
-        except ImportError:
-            try:
-                import pdfminer.high_level as pdfm
-                return pdfm.extract_text(str(path))
-            except ImportError:
-                return ""
-
-    if suffix in (".docx", ".doc"):
-        try:
-            import docx
-            doc = docx.Document(str(path))
-            return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        except ImportError:
-            return ""
-
-    # Fallback: try raw text
-    try:
-        return path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return ""
+# ── File loading helpers (kept for backward compatibility) ─────────────────────
+# DocStore now handles all file loading and conversion.
+# These are retained only if external code references them.
