@@ -225,19 +225,28 @@ class TranscriptionWorker(QThread):
             audio = self._resample(audio, sample_rate, SAMPLE_RATE)
 
         # Skip truly silent chunks only (very low threshold for loopback audio)
+        # Teams/Zoom recordings can be very quiet — use an extremely low threshold
         rms = float(np.sqrt(np.mean(audio ** 2)))
-        if rms < 0.0005:
+        if rms < 0.00005:
             return None
+
+        # Normalize quiet audio (e.g. Teams recordings) so Whisper gets a usable signal
+        peak = float(np.max(np.abs(audio)))
+        if 0 < peak < 0.1:
+            # Boost to ~50% amplitude, cap at 0.95 to avoid clipping
+            gain = min(0.5 / peak, 20.0)
+            audio = audio * gain
+            audio = np.clip(audio, -0.95, 0.95)
 
         segments, _info = self._model.transcribe(
             audio,
             language="en",
             initial_prompt=INITIAL_PROMPT,
             vad_filter=False,          # disabled — loopback audio is always "active"
-            beam_size=3,
+            beam_size=5,
             best_of=3,
             temperature=0.0,
-            no_speech_threshold=0.7,   # higher = more permissive
+            no_speech_threshold=0.4,   # lower = less likely to drop quiet speech (Teams/Zoom)
             condition_on_previous_text=False,
         )
 

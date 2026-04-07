@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SAMPLE_RATE   = 16_000          # Whisper expects 16 kHz mono
@@ -35,6 +38,7 @@ class AudioCapture(QObject):
 
     chunk_ready       = pyqtSignal(bytes, int)
     device_list_ready = pyqtSignal(list)
+    audio_level       = pyqtSignal(float)   # RMS level for diagnostics
     error             = pyqtSignal(str)
 
     SOURCE_SYSTEM = 0
@@ -168,6 +172,7 @@ class AudioCapture(QObject):
             try:
                 for lb in pa.get_loopback_device_info_generator():
                     all_loopbacks.append(lb)
+                    logger.info(f"  Loopback device: [{lb['index']}] {lb['name']}")
                     lb_name = lb["name"].lower()
                     # Match if either name contains the other
                     if target_name in lb_name or lb_name in target_name:
@@ -186,6 +191,11 @@ class AudioCapture(QObject):
             # Last resort: first available loopback
             if loopback_dev is None and all_loopbacks:
                 loopback_dev = all_loopbacks[0]
+
+            if loopback_dev:
+                logger.info(f"  Selected loopback: [{loopback_dev['index']}] {loopback_dev['name']}")
+            else:
+                logger.warning("  No loopback device matched!")
 
             if loopback_dev is None:
                 self.error.emit(
@@ -230,6 +240,9 @@ class AudioCapture(QObject):
                 if len(accumulated) >= CHUNK_FRAMES:
                     chunk       = accumulated[:CHUNK_FRAMES]
                     accumulated = accumulated[CHUNK_FRAMES:]
+                    # Emit audio level for UI diagnostics
+                    rms = float(np.sqrt(np.mean(chunk ** 2)))
+                    self.audio_level.emit(rms)
                     self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             stream.stop_stream()

@@ -343,6 +343,7 @@ class MainWindow(QMainWindow):
 
         self._audio.chunk_ready.connect(self._on_audio_chunk)
         self._audio.device_list_ready.connect(self._on_device_list)
+        self._audio.audio_level.connect(self._on_audio_level)
         self._audio.error.connect(lambda m: self._set_bottom(f"Audio: {m}"))
 
         self._trans.transcript_ready.connect(self._on_transcript)
@@ -761,14 +762,16 @@ class MainWindow(QMainWindow):
 
     # ── Audio → Transcript ─────────────────────────────────────────────────────
 
+    def _on_audio_level(self, rms: float):
+        """Show real-time audio level in the status bar."""
+        if not self._recording or self._paused:
+            return
+        bars = int(min(rms * 500, 10))
+        self._set_bottom(f"🎙 Audio level: {'█' * bars}{'░' * (10 - bars)}  RMS={rms:.5f} — listening…")
+
     def _on_audio_chunk(self, pcm_bytes: bytes, sample_rate: int):
         if not self._recording or self._paused:
             return
-        # Show audio activity in status bar
-        audio = np.frombuffer(pcm_bytes, dtype=np.float32)
-        rms   = float(np.sqrt(np.mean(audio ** 2)))
-        bars  = int(min(rms * 500, 10))
-        self._set_bottom(f"🎙 Audio level: {'█' * bars}{'░' * (10 - bars)}  RMS={rms:.4f} — listening…")
         self._trans.enqueue_chunk(pcm_bytes, sample_rate)
 
     def _on_transcript(self, text: str, timestamp: str):
