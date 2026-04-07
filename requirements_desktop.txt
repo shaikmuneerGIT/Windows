@@ -1,0 +1,46 @@
+# ============================================================
+#  OIC / VBCS Live Q&A — Windows Desktop App Requirements
+#  Install all: pip install -r requirements_desktop.txt
+# ============================================================
+
+# ── GUI Framework ────────────────────────────────────────────
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+PyQt6-sip>=13.6.0
+
+# ── Audio Capture ────────────────────────────────────────────
+# PyAudioWPatch: WASAPI loopback on Windows (stable, no segfault)
+PyAudioWPatch>=0.2.12
+# sounddevice: device listing + microphone capture
+sounddevice>=0.4.6
+numpy>=1.24.0
+
+# ── Speech-to-Text ───────────────────────────────────────────
+# faster-whisper: local Whisper (much more accurate than browser Whisper)
+faster-whisper>=1.0.0
+
+# ── RAG / LLM (OpenAI cloud mode) ────────────────────────────
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-openai>=0.1.0
+langchain-community>=0.2.0
+faiss-cpu>=1.7.4
+openai>=1.30.0
+
+# ── RAG / LLM (Local Ollama mode — optional) ─────────────────
+# Uncomment if you want to use a local Ollama server instead of OpenAI
+# langchain-ollama>=0.1.0
+
+# ── Document parsing (for file uploads) ──────────────────────
+pypdf>=4.0.0
+python-docx>=1.1.0
+
+# ── Utilities ────────────────────────────────────────────────
+python-dotenv>=1.0.0
+tiktoken>=0.6.0
+
+# ── Optional: GPU acceleration for faster-whisper ────────────
+# Uncomment if you have an NVIDIA GPU with CUDA 11.8+
+# torch>=2.1.0  --index-url https://download.pytorch.org/whl/cu118
+# nvidia-cublas-cu11
+# nvidia-cudnn-cu11

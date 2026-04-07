@@ -1,0 +1,171 @@
+================================================================
+  OIC / VBCS Live Q&A  —  Windows Desktop Application
+  HOW TO INSTALL & RUN
+================================================================
+
+WHAT YOU GET
+------------
+A native Windows desktop app that:
+  • Captures system audio (YouTube, Teams, Zoom) via WASAPI loopback
+    WITHOUT any browser screen-share dialog
+  • Transcribes speech locally with faster-whisper (much more accurate)
+  • Auto-detects Oracle/OIC/VBCS questions and answers them via RAG
+  • Reads your OIC_VBCS_Knowledge_Base.md automatically at startup
+  • Dark theme UI — question history, manual Q&A, document upload
+
+
+
+REQUIREMENTS
+------------
+  • Windows 10 / 11  (WASAPI loopback is Windows-only)
+  • Python 3.10 or 3.11  (64-bit)
+    Download: https://www.python.org/downloads/
+  • 4 GB RAM minimum (8 GB recommended for Whisper "small" model)
+  • Internet connection for OpenAI API calls
+    (OR local Ollama install for fully offline mode)
+
+
+
+STEP 1 — CREATE A VIRTUAL ENVIRONMENT (RECOMMENDED)
+-----------------------------------------------------
+Open Command Prompt or PowerShell in the oic_desktop_app folder:
+
+    python -m venv venv
+    venv\Scripts\activate
+
+
+STEP 2 — INSTALL DEPENDENCIES
+-------------------------------
+    pip install -r requirements_desktop.txt
+
+This installs PyQt6, soundcard (WASAPI), faster-whisper, LangChain, FAISS,
+and all other required packages.
+
+If you see an error about Visual C++ for soundcard on Windows:
+  Install "Build Tools for Visual Studio 2022" from:
+  https://visualstudio.microsoft.com/visual-cpp-build-tools/
+
+
+STEP 3 — SET YOUR OPENAI API KEY
+----------------------------------
+Create a file named  .env  in the oic_desktop_app folder:
+
+    OPENAI_API_KEY=sk-your-real-key-here
+
+Get your key from: https://platform.openai.com/api-keys
+
+  ── OR use local Ollama (no API key needed) ──────────────────────
+  1. Install Ollama:  https://ollama.com
+  2. Run in terminal:
+       ollama pull llama3
+       ollama pull nomic-embed-text
+  3. Leave OPENAI_API_KEY blank — the app detects Ollama automatically.
+
+
+STEP 4 — PLACE YOUR KNOWLEDGE BASE FILE
+-----------------------------------------
+Copy  OIC_VBCS_Knowledge_Base.md  into the oic_desktop_app folder.
+The app indexes it automatically at startup (no manual upload needed).
+
+    oic_desktop_app\
+      ├── main_window.py
+      ├── audio_capture.py
+      ├── transcription_worker.py
+      ├── qa_worker.py
+      ├── OIC_VBCS_Knowledge_Base.md    ← place here
+      ├── .env                           ← your API key
+      └── requirements_desktop.txt
+
+
+STEP 5 — RUN THE APP
+---------------------
+    python main_window.py
+
+The dark-theme window will open.
+
+
+STEP 6 — FIRST USE
+--------------------
+1. AUDIO SOURCE
+   • "System Audio (WASAPI)" — captures YouTube, Teams, Zoom, etc.
+     You don't need to share your screen. Audio is captured directly.
+   • "Microphone Only" — if you want to capture your own voice.
+   • "System Audio + Microphone" — both simultaneously.
+
+2. DEVICE
+   Select your audio output device (the one playing the training video).
+   Click ↺ to refresh the list.
+
+3. WHISPER MODEL
+   • base     — fastest, less accurate
+   • small    — good balance (recommended for most PCs)
+   • medium   — more accurate, needs 4 GB RAM
+   • large-v3 — best accuracy, needs 8 GB RAM + GPU recommended
+
+4. CLICK ▶ START
+   The app will:
+   - Load the Whisper model (first time: ~30 seconds, downloads ~500 MB)
+   - Begin transcribing audio in real time
+   - Auto-detect OIC/VBCS questions and answer them
+
+5. MANUAL Q&A
+   Type any question in the box at the bottom-right and press Ask →
+   You can ask questions even while audio is paused.
+
+6. UPLOAD DOCUMENTS
+   Click "Upload Document" to add extra PDF/DOCX/TXT files to the
+   knowledge base at any time.
+
+
+KEYBOARD SHORTCUTS
+------------------
+  Space      — Pause / Resume transcription
+  Esc        — Stop session
+
+
+TROUBLESHOOTING
+---------------
+❌ "soundcard not installed"
+   → pip install soundcard
+   → If it fails: install Visual C++ Build Tools (see Step 2)
+
+❌ "faster-whisper not installed"
+   → pip install faster-whisper
+
+❌ No audio captured / silent transcription
+   → Make sure "System Audio (WASAPI)" is selected
+   → Choose the correct output device (e.g. "Speakers (Realtek)")
+   → Play something audible and check Windows Volume Mixer
+
+❌ OIC answer is wrong / generic
+   → Make sure OIC_VBCS_Knowledge_Base.md is in the app folder
+   → Check the "Docs" counter in the app — it should be > 0
+   → Try clicking "Upload Document" to manually add the file
+
+❌ App crashes on start
+   → Make sure Python 3.10/3.11 (64-bit) is installed
+   → Run: python --version   (should say Python 3.10.x or 3.11.x)
+   → Run: pip install --upgrade PyQt6
+
+❌ Whisper model download stuck
+   → Models are cached in: %USERPROFILE%\.cache\huggingface\hub\
+   → Delete that folder and retry if corrupted
+
+
+FOLDER STRUCTURE AFTER SETUP
+------------------------------
+oic_desktop_app\
+  ├── main_window.py           — main UI window
+  ├── audio_capture.py         — WASAPI loopback audio capture
+  ├── transcription_worker.py  — faster-whisper transcription thread
+  ├── qa_worker.py             — RAG Q&A thread
+  ├── requirements_desktop.txt — Python dependencies
+  ├── HOW_TO_RUN_DESKTOP.txt   — this file
+  ├── .env                     — your OPENAI_API_KEY
+  ├── OIC_VBCS_Knowledge_Base.md
+  └── vectorstore\             — created automatically (FAISS index)
+
+
+================================================================
+  Questions? Re-run the app after fixing any error above.
+================================================================
