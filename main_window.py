@@ -335,6 +335,7 @@ class MainWindow(QMainWindow):
         self._cur_answer_card: AnswerCard | None = None
         self._dev_items   = []
         self._pending_index_files: list = []
+        self._transcript_buffer: list[str] = []   # all transcript chunks since last Q&A
 
         # ── Workers ────────────────────────────────────────────────────────────
         self._audio = AudioCapture()
@@ -688,6 +689,7 @@ class MainWindow(QMainWindow):
         self._qa_history.clear()
         self._history_list.clear()
         self._pending_q = ""
+        self._transcript_buffer.clear()
 
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -711,7 +713,8 @@ class MainWindow(QMainWindow):
             self._pause_btn.setText("▶  Resume")
             self._rec_dot.setStyleSheet(f"color: {WARNING}; font-size:14px;")
             self._set_status("⏸ Paused", WARNING)
-            self._set_bottom("Paused — press Resume to continue")
+            # Fire Q&A with accumulated transcript on pause
+            self._fire_qa_on_pause()
         else:
             self._paused = False
             self._audio.resume()
@@ -721,6 +724,32 @@ class MainWindow(QMainWindow):
             self._rec_dot.setStyleSheet(f"color: {DANGER}; font-size:14px;")
             self._set_status("● Recording", DANGER)
             self._set_bottom("Resumed — listening…")
+
+    def _fire_qa_on_pause(self):
+        """On pause, send the full accumulated transcript to Q&A.
+        Searches uploaded docs first; falls back to web if not found."""
+        if not self._transcript_buffer:
+            self._set_bottom("Paused — no transcript to query")
+            return
+        if self._qa_active:
+            self._set_bottom("Paused — Q&A already in progress…")
+            return
+
+        full_text = " ".join(self._transcript_buffer)
+        self._transcript_buffer.clear()
+        self._pending_q = ""
+
+        # Check history for a similar question
+        hist = self._find_history(full_text)
+        if hist:
+            card = self._feed.add_answer(full_text[:120] + "…")
+            card.append_token(hist["answer"])
+            card.finish("docs")
+            self._set_bottom("Paused — answered from history")
+            return
+
+        self._set_bottom("Paused — querying knowledge base…")
+        self._run_qa(full_text)
 
     def _stop_session(self):
         self._recording = False
@@ -743,6 +772,7 @@ class MainWindow(QMainWindow):
         self._qa_active    = False
         self._qa_history.clear()
         self._history_list.clear()
+        self._transcript_buffer.clear()
         self._set_status("● Ready", TEXT_MUTED)
         self._set_bottom("Session stopped — ready to start again")
 
@@ -783,7 +813,9 @@ class MainWindow(QMainWindow):
         self._chunk_count += 1
         self._chunk_lbl.setText(f"{self._chunk_count} chunks")
         self._feed.add_transcript(timestamp, text)
-        # Feed to auto-Q&A
+        # Accumulate all transcript text for Q&A on pause
+        self._transcript_buffer.append(text.strip())
+        # Feed to auto-Q&A (silence-based trigger still works during recording)
         self._accumulate_for_qa(text)
 
     def _on_model_loaded(self):

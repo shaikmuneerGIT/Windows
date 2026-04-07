@@ -273,6 +273,8 @@ class _WorkerThread(QThread):
 
                 # Detect "not found" → web fallback
                 if _is_not_found(full_text):
+                    # Signal a clear so UI knows we're retrying via web
+                    self._worker.token_ready.emit("\n\n🌐 Searching the web…\n\n")
                     full_text = ""
                     oracle_q = f"Oracle OIC Oracle Integration Cloud VBCS: {question}"
                     for token in self._service.stream_query(oracle_q, force_web=True):
