@@ -122,6 +122,8 @@ class QAWorker(QObject):
         super().__init__(parent)
         self._task_queue: queue.Queue = queue.Queue()
         self._service = None           # QAService instance (created in worker thread)
+        self._doc_count_lock = threading.Lock()
+        self._doc_count = 0
         self._thread  = _WorkerThread(self._task_queue, self)
 
     # ── Public API (safe to call from GUI thread) ──────────────────────────────
@@ -171,12 +173,12 @@ class QAWorker(QObject):
 
     @property
     def document_count(self) -> int:
-        if self._thread._service and self._thread._service.vectorstore:
-            try:
-                return self._thread._service.vectorstore.index.ntotal
-            except Exception:
-                return 0
-        return 0
+        with self._doc_count_lock:
+            return self._doc_count
+
+    def _update_doc_count(self, count: int):
+        with self._doc_count_lock:
+            self._doc_count = count
 
 
 # ── Internal worker thread ─────────────────────────────────────────────────────
@@ -331,7 +333,9 @@ class _WorkerThread(QThread):
                 done += len(batch)
                 self._worker.index_progress.emit(done, total)
 
-            self._worker.index_done.emit(self._service.document_count)
+            count = self._service.document_count
+            self._worker._update_doc_count(count)
+            self._worker.index_done.emit(count)
 
         except Exception as ex:
             self._worker.error.emit(f"Indexing error: {ex}")

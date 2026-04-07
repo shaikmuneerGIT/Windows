@@ -28,8 +28,7 @@ faiss-cpu>=1.7.4
 openai>=1.30.0
 
 # ── RAG / LLM (Local Ollama mode — optional) ─────────────────
-# Uncomment if you want to use a local Ollama server instead of OpenAI
-# langchain-ollama>=0.1.0
+langchain-ollama>=0.1.0
 
 # ── Document parsing (for file uploads) ──────────────────────
 pypdf>=4.0.0

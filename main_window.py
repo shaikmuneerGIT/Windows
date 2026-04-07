@@ -10,9 +10,11 @@ Run:  python main_window.py
 import sys
 sys.coinit_flags = 2   # COINIT_APARTMENTTHREADED — matches what Qt expects
 import os
+import re
 import threading
 import queue
 import time
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 
@@ -30,7 +32,8 @@ from PyQt6.QtGui import (
 )
 
 from audio_capture import AudioCapture
-from transcription_worker import TranscriptionWorker
+from transcription_worker import TranscriptionWorker, lookslike_question
+from transcription_worker import _correct_terms as correct_oracle_terms
 from qa_worker import QAWorker
 
 # ── Dark theme palette ─────────────────────────────────────────────────────────
@@ -762,7 +765,6 @@ class MainWindow(QMainWindow):
         if not self._recording or self._paused:
             return
         # Show audio activity in status bar
-        import numpy as np
         audio = np.frombuffer(pcm_bytes, dtype=np.float32)
         rms   = float(np.sqrt(np.mean(audio ** 2)))
         bars  = int(min(rms * 500, 10))
@@ -816,19 +818,6 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-    # ── Oracle term correction ─────────────────────────────────────────────────
-
-    _CORRECTIONS = {
-        "bbcs": "VBCS", "vbc's": "VBCS", "pbcs": "VBCS",
-        "oik": "OIC", "oi c": "OIC", "oeic": "OIC",
-    }
-
-    def _correct_terms(self, text: str) -> str:
-        t = text
-        for wrong, right in self._CORRECTIONS.items():
-            t = t.replace(wrong, right).replace(wrong.upper(), right)
-        return t
-
     # ── Auto-Q&A pipeline ──────────────────────────────────────────────────────
 
     _ORACLE_RE = (
@@ -838,7 +827,6 @@ class MainWindow(QMainWindow):
     )
 
     def _looks_like_question(self, text: str) -> bool:
-        import re
         t = text.lower().strip()
         if len(t) < 8:
             return False
@@ -851,7 +839,7 @@ class MainWindow(QMainWindow):
         return False
 
     def _accumulate_for_qa(self, text: str):
-        corrected = self._correct_terms(text)
+        corrected = correct_oracle_terms(text)
         if not self._looks_like_question(corrected):
             return
         self._pending_q = (self._pending_q + " " + corrected).strip()
@@ -922,7 +910,6 @@ class MainWindow(QMainWindow):
     # ── History ────────────────────────────────────────────────────────────────
 
     def _qa_key(self, q: str) -> str:
-        import re
         return re.sub(r'\s+', ' ',
             re.sub(r'[^a-z0-9 ]', '',
             re.sub(r'\b(what|is|are|the|a|an|of|in|by|to|do|does|mean|about)\b', ' ',
@@ -1006,7 +993,8 @@ class MainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
-            if self._recording:
+            # Don't intercept Space when typing in the question input
+            if self._recording and not self._question_input.hasFocus():
                 self._toggle_pause()
                 event.accept()
                 return
@@ -1017,6 +1005,8 @@ class MainWindow(QMainWindow):
         self._trans.stop_worker()
         self._trans.wait(2000)
         self._qa.stop()
+        if self._qa._thread.isRunning():
+            self._qa._thread.wait(3000)
         event.accept()
 
 
