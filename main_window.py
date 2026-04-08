@@ -957,6 +957,10 @@ class MainWindow(QMainWindow):
         for pat in self._NOISE_PATTERNS:
             if pat in t:
                 return True
+        # Detect Whisper prompt-echo hallucinations
+        from transcription_worker import _is_prompt_echo
+        if _is_prompt_echo(t):
+            return True
         return False
 
     # ── Search pipeline (spacebar-controlled) ────────────────────────────────

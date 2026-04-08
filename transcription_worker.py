@@ -52,6 +52,14 @@ _NOISE_PATTERNS = [
     re.compile(r"^\s*[\s\.]+\s*$"),
 ]
 
+# Words from INITIAL_PROMPT — used to detect Whisper echo-hallucinations
+_PROMPT_WORDS = set(INITIAL_PROMPT.lower().split())
+# Also include common filler words that appear alongside prompt echoes
+_FILLER_WORDS = {
+    "the", "a", "an", "and", "or", "in", "of", "to", "for",
+    "is", "are", "was", "were", "it", "its", "this", "that",
+}
+
 # Oracle domain terms — auto-QA trigger words
 _ORACLE_TERMS = re.compile(
     r"\b(oic|vbcs|oracle|integration|cloud|adapter|rest|soap|ftp|"
@@ -92,6 +100,37 @@ def _is_noise(text: str) -> bool:
     words = stripped.lower().split()
     if len(words) >= 3 and len(set(words)) == 1:
         return True
+    # Prompt-echo hallucination: text consists mostly of INITIAL_PROMPT words
+    # e.g. "REST SOAP", "OIC Oracle Integration Cloud VBCS Visual Builder"
+    if _is_prompt_echo(stripped):
+        return True
+    return False
+
+
+def _is_prompt_echo(text: str) -> bool:
+    """Return True if text is Whisper echoing the initial prompt during silence.
+
+    During quiet/silence gaps Whisper often regurgitates parts of the
+    INITIAL_PROMPT.  We detect this by checking whether EVERY meaningful
+    word in the text comes from the prompt vocabulary.
+    """
+    words = [w.strip(".,!?;:'\"") for w in text.lower().split()]
+    words = [w for w in words if w]   # drop empties
+    if not words:
+        return True
+    # Count words that are NOT from prompt and NOT filler
+    novel = sum(1 for w in words
+                if w not in _PROMPT_WORDS and w not in _FILLER_WORDS and len(w) > 1)
+    # If the text has zero novel words, it's a prompt echo
+    if novel == 0:
+        logger.debug(f"Prompt-echo filtered: '{text}'")
+        return True
+    # Also catch near-pure echoes: >80% prompt words in short text
+    if len(words) <= 12:
+        prompt_ratio = sum(1 for w in words if w in _PROMPT_WORDS) / len(words)
+        if prompt_ratio >= 0.8:
+            logger.debug(f"Prompt-echo filtered (ratio={prompt_ratio:.0%}): '{text}'")
+            return True
     return False
 
 
@@ -247,11 +286,15 @@ class TranscriptionWorker(QThread):
             audio,
             language="en",
             initial_prompt=INITIAL_PROMPT,
-            vad_filter=False,          # disabled — loopback audio is always "active"
+            vad_filter=True,           # filter silence — prevents prompt-echo hallucinations
+            vad_parameters=dict(
+                min_silence_duration_ms=500,   # 0.5 s silence → split
+                speech_pad_ms=200,             # keep 200 ms around speech
+            ),
             beam_size=5,
             best_of=3,
             temperature=0.0,
-            no_speech_threshold=0.4,   # lower = less likely to drop quiet speech (Teams/Zoom)
+            no_speech_threshold=0.5,   # higher = more aggressive silence skip
             condition_on_previous_text=False,
         )
 
