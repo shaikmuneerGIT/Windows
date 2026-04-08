@@ -33,12 +33,14 @@ class AudioCapture(QObject):
     -------
     chunk_ready(bytes, int)        Raw float32 PCM + sample rate
     device_list_ready(list)        [(id, label, is_loopback), ...]
+    capture_info(str)              Diagnostic info about the selected device
     error(str)
     """
 
     chunk_ready       = pyqtSignal(bytes, int)
     device_list_ready = pyqtSignal(list)
     audio_level       = pyqtSignal(float)   # RMS level for diagnostics
+    capture_info      = pyqtSignal(str)     # diagnostic info about capture
     error             = pyqtSignal(str)
 
     SOURCE_SYSTEM = 0
@@ -156,6 +158,7 @@ class AudioCapture(QObject):
                     import sounddevice as sd
                     idx = int(self._device_id)
                     target_name = sd.query_devices(idx)["name"].lower()
+                    logger.info(f"User-selected device [{idx}]: {target_name}")
                 except Exception:
                     target_name = None
 
@@ -165,41 +168,95 @@ class AudioCapture(QObject):
                     wasapi_info["defaultOutputDevice"]
                 )
                 target_name = default_out["name"].lower()
+                logger.info(f"Using Windows default output: {target_name}")
 
-            # Find matching loopback device
+            self.capture_info.emit(f"Target output device: {target_name}")
+
+            # Find matching loopback device using multiple strategies
             loopback_dev = None
             all_loopbacks = []
+            match_reason = ""
+            target_norm = _normalize_device_name(target_name)
             try:
                 for lb in pa.get_loopback_device_info_generator():
                     all_loopbacks.append(lb)
                     logger.info(f"  Loopback device: [{lb['index']}] {lb['name']}")
-                    lb_name = lb["name"].lower()
-                    # Match if either name contains the other
-                    if target_name in lb_name or lb_name in target_name:
-                        loopback_dev = lb
-                        break
-                    # Partial word match (e.g. "jabra" in name)
-                    for word in target_name.split():
-                        if len(word) > 3 and word in lb_name:
-                            loopback_dev = lb
-                            break
-                    if loopback_dev:
-                        break
-            except Exception:
-                pass
+            except Exception as ex:
+                logger.warning(f"  Error enumerating loopback devices: {ex}")
 
-            # Last resort: first available loopback
+            # Strategy 1: Exact normalized name match
+            for lb in all_loopbacks:
+                lb_norm = _normalize_device_name(lb["name"])
+                if target_norm == lb_norm:
+                    loopback_dev = lb
+                    match_reason = "exact name match"
+                    break
+
+            # Strategy 2: Substring match (either contains the other)
+            if loopback_dev is None:
+                for lb in all_loopbacks:
+                    lb_norm = _normalize_device_name(lb["name"])
+                    if target_norm in lb_norm or lb_norm in target_norm:
+                        loopback_dev = lb
+                        match_reason = "substring match"
+                        break
+
+            # Strategy 3: Significant word overlap (words > 3 chars)
+            if loopback_dev is None:
+                target_words = {w for w in target_norm.split() if len(w) > 3}
+                best_overlap = 0
+                for lb in all_loopbacks:
+                    lb_norm = _normalize_device_name(lb["name"])
+                    lb_words = {w for w in lb_norm.split() if len(w) > 3}
+                    overlap = len(target_words & lb_words)
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        loopback_dev = lb
+                        match_reason = f"word overlap ({overlap} words)"
+                # Require at least 1 significant word match
+                if best_overlap < 1:
+                    loopback_dev = None
+
+            # Strategy 4: Match by WASAPI default output device index
+            if loopback_dev is None:
+                try:
+                    default_out_idx = wasapi_info["defaultOutputDevice"]
+                    default_out_info = pa.get_device_info_by_index(default_out_idx)
+                    default_out_name = _normalize_device_name(default_out_info["name"])
+                    for lb in all_loopbacks:
+                        lb_norm = _normalize_device_name(lb["name"])
+                        if default_out_name in lb_norm or lb_norm in default_out_name:
+                            loopback_dev = lb
+                            match_reason = "WASAPI default output fallback"
+                            break
+                except Exception:
+                    pass
+
+            # Strategy 5: Last resort — first available loopback
             if loopback_dev is None and all_loopbacks:
                 loopback_dev = all_loopbacks[0]
+                match_reason = "first available (no name match)"
 
             if loopback_dev:
-                logger.info(f"  Selected loopback: [{loopback_dev['index']}] {loopback_dev['name']}")
-            else:
-                logger.warning("  No loopback device matched!")
+                info_msg = (
+                    f"Loopback: {loopback_dev['name']} "
+                    f"({match_reason}, {int(loopback_dev['defaultSampleRate'])}Hz, "
+                    f"{loopback_dev['maxInputChannels']}ch)"
+                )
+                logger.info(f"  Selected: [{loopback_dev['index']}] {info_msg}")
+                self.capture_info.emit(info_msg)
 
-            if loopback_dev is None:
+                # List other available loopbacks for diagnostics
+                if len(all_loopbacks) > 1:
+                    others = [lb["name"] for lb in all_loopbacks
+                              if lb["index"] != loopback_dev["index"]]
+                    logger.info(f"  Other loopbacks: {others}")
+            else:
+                logger.warning("  No loopback device found!")
+                lb_names = [lb["name"] for lb in all_loopbacks]
                 self.error.emit(
                     "No WASAPI loopback device found.\n"
+                    f"Available loopback devices: {lb_names}\n"
                     "Go to Windows Sound Settings → Recording tab\n"
                     "→ right-click empty area → Show Disabled Devices\n"
                     "→ Enable 'Stereo Mix', then restart the app."
@@ -219,6 +276,8 @@ class AudioCapture(QObject):
             )
 
             accumulated = np.zeros(0, dtype=np.float32)
+            level_samples = 0                          # track samples for frequent level reporting
+            level_interval = SAMPLE_RATE // 2          # report level every ~0.5 s
 
             while not self._stop_event.is_set():
                 if self._pause_event.is_set():
@@ -237,12 +296,19 @@ class AudioCapture(QObject):
                     data = _resample(data, dev_rate, SAMPLE_RATE)
 
                 accumulated = np.concatenate([accumulated, data])
+                level_samples += len(data)
+
+                # Emit audio level every ~0.5 s for fast UI feedback
+                if level_samples >= level_interval:
+                    rms = float(np.sqrt(np.mean(
+                        accumulated[-level_samples:] ** 2
+                    )))
+                    self.audio_level.emit(rms)
+                    level_samples = 0
+
                 if len(accumulated) >= CHUNK_FRAMES:
                     chunk       = accumulated[:CHUNK_FRAMES]
                     accumulated = accumulated[CHUNK_FRAMES:]
-                    # Emit audio level for UI diagnostics
-                    rms = float(np.sqrt(np.mean(chunk ** 2)))
-                    self.audio_level.emit(rms)
                     self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             # Flush remaining audio so short recordings are not lost
@@ -307,6 +373,28 @@ class AudioCapture(QObject):
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+import re as _re
+
+def _normalize_device_name(name: str) -> str:
+    """Normalize a device name for robust comparison.
+
+    Strips loopback markers, parenthetical suffixes, extra whitespace,
+    and common irrelevant tokens so that names from sounddevice and
+    PyAudioWPatch can be matched even when they differ slightly.
+    """
+    n = name.lower()
+    # Remove loopback markers
+    for tag in ("[loopback]", "(loopback)", "loopback"):
+        n = n.replace(tag, "")
+    # Remove parenthetical content like "(Realtek(R) Audio)"
+    n = _re.sub(r"\([^)]*\)", " ", n)
+    # Remove special characters
+    n = _re.sub(r"[^\w\s]", " ", n)
+    # Collapse whitespace
+    n = " ".join(n.split())
+    return n.strip()
+
 
 def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     if orig_sr == target_sr:

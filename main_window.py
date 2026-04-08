@@ -378,6 +378,7 @@ class MainWindow(QMainWindow):
         self._audio.chunk_ready.connect(self._on_audio_chunk)
         self._audio.device_list_ready.connect(self._on_device_list)
         self._audio.audio_level.connect(self._on_audio_level)
+        self._audio.capture_info.connect(self._on_capture_info)
         self._audio.error.connect(lambda m: self._set_bottom(f"Audio: {m}"))
 
         self._trans.transcript_ready.connect(self._on_transcript)
@@ -900,6 +901,10 @@ class MainWindow(QMainWindow):
             return
         bars = int(min(rms * 500, 10))
         self._set_bottom(f"🎙 Audio level: {'█' * bars}{'░' * (10 - bars)}  RMS={rms:.5f} — listening…")
+
+    def _on_capture_info(self, info: str):
+        """Show loopback device diagnostic info in the status bar."""
+        self._set_bottom(f"🔊 {info}")
 
     def _on_audio_chunk(self, pcm_bytes: bytes, sample_rate: int):
         if not self._recording or self._paused:

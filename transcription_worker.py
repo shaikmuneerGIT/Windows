@@ -19,10 +19,13 @@ import io
 import queue
 import time
 import re
+import logging
 import numpy as np
 from datetime import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+logger = logging.getLogger(__name__)
 
 try:
     from faster_whisper import WhisperModel
@@ -152,7 +155,7 @@ class TranscriptionWorker(QThread):
         try:
             self._queue.put_nowait((pcm_bytes, sample_rate))
         except queue.Full:
-            pass   # drop chunk; transcription can't keep up
+            logger.warning("Transcription queue full — dropped audio chunk")
 
     def pause(self):
         self._paused = True
@@ -228,6 +231,7 @@ class TranscriptionWorker(QThread):
         # Teams/Zoom recordings can be very quiet — use an extremely low threshold
         rms = float(np.sqrt(np.mean(audio ** 2)))
         if rms < 0.00005:
+            logger.debug(f"Silent chunk skipped (RMS={rms:.8f})")
             return None
 
         # Normalize quiet audio (e.g. Teams recordings) so Whisper gets a usable signal
@@ -237,6 +241,7 @@ class TranscriptionWorker(QThread):
             gain = min(0.5 / peak, 20.0)
             audio = audio * gain
             audio = np.clip(audio, -0.95, 0.95)
+            logger.info(f"Normalized quiet audio: peak={peak:.6f} → gain={gain:.1f}x")
 
         segments, _info = self._model.transcribe(
             audio,
