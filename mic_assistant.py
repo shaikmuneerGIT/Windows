@@ -81,16 +81,6 @@ QPushButton#btnClear {{
     padding: 6px 14px;
     font-size: 12px;
 }}
-QPushButton#btnSend {{
-    background-color: {SUCCESS};
-    color: white;
-    border-radius: 7px;
-    padding: 10px 22px;
-    font-weight: 700;
-    font-size: 13px;
-    border: none;
-}}
-QPushButton#btnSend:hover {{ background-color: #16a34a; }}
 QComboBox {{
     background-color: {SURFACE2};
     border: 1px solid {BORDER};
@@ -366,16 +356,9 @@ class MicAssistant(QMainWindow):
         input_lay.setContentsMargins(0, 0, 0, 0)
         input_lay.setSpacing(4)
 
-        inp_hdr = QHBoxLayout()
         inp_title = QLabel("INPUT — What you said")
         inp_title.setObjectName("sectionTitle")
-        inp_hdr.addWidget(inp_title)
-        inp_hdr.addStretch()
-        self._send_btn = QPushButton("Send to AI")
-        self._send_btn.setObjectName("btnSend")
-        self._send_btn.clicked.connect(self._send_to_llm)
-        inp_hdr.addWidget(self._send_btn)
-        input_lay.addLayout(inp_hdr)
+        input_lay.addWidget(inp_title)
 
         self._input_box = QTextEdit()
         self._input_box.setPlaceholderText(
@@ -397,7 +380,7 @@ class MicAssistant(QMainWindow):
 
         self._output_box = QTextEdit()
         self._output_box.setPlaceholderText(
-            "AI response will appear here after you click 'Send to AI'..."
+            "AI response will appear here automatically when you stop recording..."
         )
         self._output_box.setReadOnly(True)
         output_lay.addWidget(self._output_box, 1)
@@ -466,6 +449,14 @@ class MicAssistant(QMainWindow):
                 "Run:  pip install faster-whisper\n\nThen restart.")
             return
 
+        # Clear previous session data before starting fresh
+        self._transcript_parts.clear()
+        self._input_box.clear()
+        self._output_box.clear()
+        self._output_box.setPlaceholderText(
+            "AI response will appear here automatically when you stop recording..."
+        )
+
         # Force microphone source
         self._audio.set_source(AudioCapture.SOURCE_MIC)
         dev_id = self._dev_combo.currentData()
@@ -507,11 +498,17 @@ class MicAssistant(QMainWindow):
         self._mic_btn.setStyle(self._mic_btn.style())
         self._rec_dot.setText("")
         self._rec_dot.setStyleSheet(f"color:{TEXT_MUTED}; font-size:13px;")
-        self._set_status("Stopped")
-        self._bottom_lbl.setText(
-            f"Captured {len(self._transcript_parts)} segments — "
-            "click 'Send to AI' for a response"
-        )
+
+        # Auto-send transcript to API
+        if self._transcript_parts:
+            self._set_status("Stopped — sending to AI...")
+            self._bottom_lbl.setText(
+                f"Captured {len(self._transcript_parts)} segments — querying AI..."
+            )
+            self._send_to_llm()
+        else:
+            self._set_status("Stopped — nothing captured")
+            self._bottom_lbl.setText("No speech detected. Press Space to try again.")
 
     def _tick(self):
         self._elapsed += 1
@@ -542,20 +539,14 @@ class MicAssistant(QMainWindow):
     def _send_to_llm(self):
         full_text = " ".join(self._transcript_parts).strip()
         if not full_text:
-            # Allow user to type manually if no transcript
             full_text = self._input_box.toPlainText().strip()
-        if not full_text:
-            QMessageBox.information(self, "Nothing to send",
-                "Record some speech first, or the input is empty.")
-            return
-        if self._llm_busy:
+        if not full_text or self._llm_busy:
             return
 
         self._llm_busy = True
+        self._mic_btn.setEnabled(False)
         self._output_box.clear()
         self._output_box.setPlaceholderText("")
-        self._send_btn.setEnabled(False)
-        self._send_btn.setText("Thinking...")
         self._set_status("Sending to AI...")
         self._llm.ask(full_text)
 
@@ -566,15 +557,13 @@ class MicAssistant(QMainWindow):
 
     def _on_llm_done(self, full_answer: str):
         self._llm_busy = False
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send to AI")
+        self._mic_btn.setEnabled(True)
         self._set_status("Response complete")
-        self._bottom_lbl.setText("Done — record more or clear to start over")
+        self._bottom_lbl.setText("Done — press Space to start a new session")
 
     def _on_llm_error(self, msg: str):
         self._llm_busy = False
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send to AI")
+        self._mic_btn.setEnabled(True)
         self._output_box.setPlainText(f"Error: {msg}")
         self._set_status("LLM error")
 
@@ -594,13 +583,8 @@ class MicAssistant(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
-            self._toggle_recording()
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Return and (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        ):
-            self._send_to_llm()
+            if not self._llm_busy:
+                self._toggle_recording()
             event.accept()
             return
         super().keyPressEvent(event)
