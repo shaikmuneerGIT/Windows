@@ -245,6 +245,12 @@ class AudioCapture(QObject):
                     self.audio_level.emit(rms)
                     self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
+            # Flush remaining audio so short recordings are not lost
+            if len(accumulated) >= SAMPLE_RATE // 2:   # at least 0.5 s
+                rms = float(np.sqrt(np.mean(accumulated ** 2)))
+                self.audio_level.emit(rms)
+                self.chunk_ready.emit(accumulated.tobytes(), SAMPLE_RATE)
+
             stream.stop_stream()
             stream.close()
 
@@ -291,6 +297,11 @@ class AudioCapture(QObject):
                         chunk       = accumulated[:CHUNK_FRAMES]
                         accumulated = accumulated[CHUNK_FRAMES:]
                         self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
+
+            # Flush remaining audio so short recordings are not lost
+            if len(accumulated) >= SAMPLE_RATE // 2:   # at least 0.5 s
+                self.chunk_ready.emit(accumulated.tobytes(), SAMPLE_RATE)
+
         except Exception as ex:
             self.error.emit(f"Microphone error: {ex}")
 

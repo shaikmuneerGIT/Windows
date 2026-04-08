@@ -386,6 +386,7 @@ class MicAssistant(QMainWindow):
         self._recording = False
         self._transcript_parts: list[str] = []
         self._llm_busy = False
+        self._accepting_audio = False     # True while we accept audio chunks
 
         # DocStore for uploaded .md files
         kb_dir = str(Path(__file__).parent / "knowledge_base")
@@ -416,6 +417,11 @@ class MicAssistant(QMainWindow):
         self._refresh_devices()
         self._refresh_doc_count()
         self._llm.start_service()
+
+        # Post-stop delay timer — waits for flushed audio to be transcribed
+        self._post_stop_timer = QTimer(self)
+        self._post_stop_timer.setSingleShot(True)
+        self._post_stop_timer.timeout.connect(self._after_stop_send)
 
     # ── UI ─────────────────────────────────────────────────────────────────────
 
@@ -610,6 +616,10 @@ class MicAssistant(QMainWindow):
                 "Run:  pip install faster-whisper\n\nThen restart.")
             return
 
+        # Cancel any pending post-stop timer from previous session
+        if self._post_stop_timer.isActive():
+            self._post_stop_timer.stop()
+
         # Clear previous session data before starting fresh
         self._transcript_parts.clear()
         self._input_box.clear()
@@ -636,6 +646,7 @@ class MicAssistant(QMainWindow):
         self._audio.start()
 
         self._recording = True
+        self._accepting_audio = True
         self._mic_btn.setText("Stop")
         self._mic_btn.setObjectName("btnStop")
         self._mic_btn.setStyle(self._mic_btn.style())  # force re-apply style
@@ -648,8 +659,9 @@ class MicAssistant(QMainWindow):
 
     def _stop_recording(self):
         self._recording = False
+        # Keep _accepting_audio = True so flushed chunks are still received
         try:
-            self._audio.stop()
+            self._audio.stop()          # flushes remaining audio buffer
         except Exception:
             pass
         self._trans.resume()  # unblock if paused
@@ -661,9 +673,17 @@ class MicAssistant(QMainWindow):
         self._rec_dot.setText("")
         self._rec_dot.setStyleSheet(f"color:{TEXT_MUTED}; font-size:13px;")
 
-        # Auto-send transcript to API
+        # Wait 2 seconds for flushed audio to be transcribed, then send
+        self._set_status("Stopped — processing audio...")
+        self._bottom_lbl.setText("Waiting for transcription to finish...")
+        self._post_stop_timer.start(2000)
+
+    def _after_stop_send(self):
+        """Called by post-stop timer — transcription should be done by now."""
+        self._accepting_audio = False    # stop accepting any stale chunks
+
         if self._transcript_parts:
-            self._set_status("Stopped — searching docs then AI...")
+            self._set_status("Searching docs then AI...")
             self._bottom_lbl.setText(
                 f"Captured {len(self._transcript_parts)} segments — querying..."
             )
@@ -680,7 +700,7 @@ class MicAssistant(QMainWindow):
     # ── Audio -> Transcription ─────────────────────────────────────────────────
 
     def _on_audio_chunk(self, pcm_bytes: bytes, sample_rate: int):
-        if self._recording:
+        if self._accepting_audio:
             self._trans.enqueue_chunk(pcm_bytes, sample_rate)
 
     def _on_transcript(self, text: str, timestamp: str):
@@ -755,6 +775,9 @@ class MicAssistant(QMainWindow):
     def _clear_all(self):
         if self._recording:
             self._stop_recording()
+        if self._post_stop_timer.isActive():
+            self._post_stop_timer.stop()
+        self._accepting_audio = False
         self._transcript_parts.clear()
         self._input_box.clear()
         self._output_box.clear()
@@ -767,7 +790,7 @@ class MicAssistant(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space:
-            if not self._llm_busy:
+            if not self._llm_busy and not self._post_stop_timer.isActive():
                 self._toggle_recording()
             event.accept()
             return
