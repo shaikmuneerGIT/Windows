@@ -20,11 +20,11 @@ from PyQt6.QtCore import QObject, pyqtSignal
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-SAMPLE_RATE   = 16_000          # Whisper expects 16 kHz mono
-CHUNK_SECONDS = 5               # 5 s gives Whisper more context per chunk
-OVERLAP_SECONDS = 1             # 1 s overlap avoids cutting words at boundaries
-CHUNK_FRAMES   = SAMPLE_RATE * CHUNK_SECONDS
-OVERLAP_FRAMES = SAMPLE_RATE * OVERLAP_SECONDS
+SAMPLE_RATE     = 16_000        # Whisper expects 16 kHz mono
+CHUNK_SECONDS   = 3             # 3 s — fast turnaround while still giving Whisper enough context
+OVERLAP_SECONDS = 0.5           # 0.5 s overlap avoids cutting words at boundaries
+CHUNK_FRAMES    = int(SAMPLE_RATE * CHUNK_SECONDS)
+OVERLAP_FRAMES  = int(SAMPLE_RATE * OVERLAP_SECONDS)
 
 
 class AudioCapture(QObject):
@@ -278,8 +278,10 @@ class AudioCapture(QObject):
             )
 
             accumulated = np.zeros(0, dtype=np.float32)
+            acc_parts: list[np.ndarray] = []   # collect small arrays, concat only when needed
+            acc_len   = 0                      # track total samples without concat
             level_samples = 0                          # track samples for frequent level reporting
-            level_interval = SAMPLE_RATE // 2          # report level every ~0.5 s
+            level_interval = SAMPLE_RATE // 4          # report level every ~0.25 s for snappy UI
 
             while not self._stop_event.is_set():
                 if self._pause_event.is_set():
@@ -297,28 +299,31 @@ class AudioCapture(QObject):
                 if dev_rate != SAMPLE_RATE:
                     data = _resample(data, dev_rate, SAMPLE_RATE)
 
-                accumulated = np.concatenate([accumulated, data])
+                acc_parts.append(data)
+                acc_len += len(data)
                 level_samples += len(data)
 
-                # Emit audio level every ~0.5 s for fast UI feedback
+                # Emit audio level every ~0.25 s for fast UI feedback
                 if level_samples >= level_interval:
-                    rms = float(np.sqrt(np.mean(
-                        accumulated[-level_samples:] ** 2
-                    )))
+                    rms = float(np.sqrt(np.mean(data ** 2)))
                     self.audio_level.emit(rms)
                     level_samples = 0
 
-                if len(accumulated) >= CHUNK_FRAMES:
+                if acc_len >= CHUNK_FRAMES:
+                    accumulated = np.concatenate(acc_parts)
                     chunk       = accumulated[:CHUNK_FRAMES]
                     # Keep last OVERLAP_FRAMES for overlap into next chunk
-                    accumulated = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                    leftover    = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                    acc_parts   = [leftover]
+                    acc_len     = len(leftover)
                     # Emit audio level for UI diagnostics
                     rms = float(np.sqrt(np.mean(chunk ** 2)))
                     self.audio_level.emit(rms)
                     self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             # Flush remaining audio so short recordings are not lost
-            if len(accumulated) >= SAMPLE_RATE // 2:   # at least 0.5 s
+            if acc_len >= SAMPLE_RATE // 2:   # at least 0.5 s
+                accumulated = np.concatenate(acc_parts)
                 rms = float(np.sqrt(np.mean(accumulated ** 2)))
                 self.audio_level.emit(rms)
                 self.chunk_ready.emit(accumulated.tobytes(), SAMPLE_RATE)
@@ -351,7 +356,8 @@ class AudioCapture(QObject):
                 pass
 
         try:
-            accumulated = np.zeros(0, dtype=np.float32)
+            acc_parts: list[np.ndarray] = []
+            acc_len = 0
             with sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
@@ -364,17 +370,23 @@ class AudioCapture(QObject):
                         time.sleep(0.05)
                         continue
                     data, _ = stream.read(1024)
-                    accumulated = np.concatenate([accumulated, data.flatten()])
-                    if len(accumulated) >= CHUNK_FRAMES:
+                    flat = data.flatten()
+                    acc_parts.append(flat)
+                    acc_len += len(flat)
+                    if acc_len >= CHUNK_FRAMES:
+                        accumulated = np.concatenate(acc_parts)
                         chunk       = accumulated[:CHUNK_FRAMES]
                         # Keep last OVERLAP_FRAMES for overlap into next chunk
-                        accumulated = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                        leftover    = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                        acc_parts   = [leftover]
+                        acc_len     = len(leftover)
                         rms = float(np.sqrt(np.mean(chunk ** 2)))
                         self.audio_level.emit(rms)
                         self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             # Flush remaining audio so short recordings are not lost
-            if len(accumulated) >= SAMPLE_RATE // 2:   # at least 0.5 s
+            if acc_len >= SAMPLE_RATE // 2:   # at least 0.5 s
+                accumulated = np.concatenate(acc_parts)
                 self.chunk_ready.emit(accumulated.tobytes(), SAMPLE_RATE)
 
         except Exception as ex:

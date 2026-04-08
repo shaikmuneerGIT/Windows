@@ -171,7 +171,7 @@ class TranscriptionWorker(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._queue      = queue.Queue(maxsize=128)
+        self._queue      = queue.Queue(maxsize=64)
         self._model      = None
         self._model_name = "small"
         self._running    = True
@@ -224,7 +224,24 @@ class TranscriptionWorker(QThread):
             if item is None:
                 break
 
-            pcm_bytes, sample_rate = item
+            # Drain stale chunks: if queue backed up, skip to the latest chunk
+            # so we always transcribe the most recent audio (prevents snowballing lag)
+            latest = item
+            skipped = 0
+            while not self._queue.empty():
+                try:
+                    nxt = self._queue.get_nowait()
+                    if nxt is None:
+                        self._running = False
+                        break
+                    latest = nxt
+                    skipped += 1
+                except queue.Empty:
+                    break
+            if skipped:
+                logger.info(f"Skipped {skipped} stale chunk(s) to reduce lag")
+
+            pcm_bytes, sample_rate = latest
             if self._paused:
                 continue
 
@@ -291,8 +308,8 @@ class TranscriptionWorker(QThread):
                 min_silence_duration_ms=300,   # short pauses OK
                 speech_pad_ms=200,             # pad speech edges to avoid clipping words
             ),
-            beam_size=5,
-            best_of=3,
+            beam_size=3,
+            best_of=1,
             temperature=0.0,
             no_speech_threshold=0.35,  # lower = keep more quiet speech
             condition_on_previous_text=True,   # use previous chunk context for continuity
