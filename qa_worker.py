@@ -69,6 +69,15 @@ STRICT DOMAIN RULES — read before answering:
    Identify ALL Oracle-related topics, questions, and concepts discussed in it.
    Answer comprehensively covering every relevant point from the transcript.
 
+FORMATTING RULES — strictly follow:
+- Structure your answer clearly by concept. Each distinct concept or topic gets its own section.
+- Use **bold headings** (e.g. **Topic Name**) to introduce each concept.
+- Use bullet points (- ) for listing steps, features, or details under each concept.
+- Use numbered lists (1. 2. 3.) for sequential steps or procedures.
+- Keep each bullet/point to 1-2 sentences max.
+- Add a blank line between sections.
+- NEVER write a wall of text or a single long paragraph.
+
 Document Context:
 {context}
 
@@ -77,7 +86,7 @@ Live Transcript (ongoing conversation / meeting):
 
 User Question: {question}
 
-Answer (Oracle OIC/VBCS expert):"""
+Answer (Oracle OIC/VBCS expert — well-structured with headings and bullets):"""
 
 _NOT_FOUND_PHRASES = [
     "couldn't find information",

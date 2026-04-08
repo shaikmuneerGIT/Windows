@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SAMPLE_RATE   = 16_000          # Whisper expects 16 kHz mono
-CHUNK_SECONDS = 3
-CHUNK_FRAMES  = SAMPLE_RATE * CHUNK_SECONDS
+CHUNK_SECONDS = 5               # 5 s gives Whisper more context per chunk
+OVERLAP_SECONDS = 1             # 1 s overlap avoids cutting words at boundaries
+CHUNK_FRAMES   = SAMPLE_RATE * CHUNK_SECONDS
+OVERLAP_FRAMES = SAMPLE_RATE * OVERLAP_SECONDS
 
 
 class AudioCapture(QObject):
@@ -308,7 +310,11 @@ class AudioCapture(QObject):
 
                 if len(accumulated) >= CHUNK_FRAMES:
                     chunk       = accumulated[:CHUNK_FRAMES]
-                    accumulated = accumulated[CHUNK_FRAMES:]
+                    # Keep last OVERLAP_FRAMES for overlap into next chunk
+                    accumulated = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                    # Emit audio level for UI diagnostics
+                    rms = float(np.sqrt(np.mean(chunk ** 2)))
+                    self.audio_level.emit(rms)
                     self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             # Flush remaining audio so short recordings are not lost
@@ -361,7 +367,10 @@ class AudioCapture(QObject):
                     accumulated = np.concatenate([accumulated, data.flatten()])
                     if len(accumulated) >= CHUNK_FRAMES:
                         chunk       = accumulated[:CHUNK_FRAMES]
-                        accumulated = accumulated[CHUNK_FRAMES:]
+                        # Keep last OVERLAP_FRAMES for overlap into next chunk
+                        accumulated = accumulated[CHUNK_FRAMES - OVERLAP_FRAMES:]
+                        rms = float(np.sqrt(np.mean(chunk ** 2)))
+                        self.audio_level.emit(rms)
                         self.chunk_ready.emit(chunk.tobytes(), SAMPLE_RATE)
 
             # Flush remaining audio so short recordings are not lost

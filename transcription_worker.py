@@ -171,7 +171,7 @@ class TranscriptionWorker(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._queue      = queue.Queue(maxsize=64)
+        self._queue      = queue.Queue(maxsize=128)
         self._model      = None
         self._model_name = "small"
         self._running    = True
@@ -276,8 +276,8 @@ class TranscriptionWorker(QThread):
         # Normalize quiet audio (e.g. Teams recordings) so Whisper gets a usable signal
         peak = float(np.max(np.abs(audio)))
         if 0 < peak < 0.1:
-            # Boost to ~50% amplitude, cap at 0.95 to avoid clipping
-            gain = min(0.5 / peak, 20.0)
+            # Gentle boost — cap gain at 10x to avoid amplifying background noise
+            gain = min(0.4 / peak, 10.0)
             audio = audio * gain
             audio = np.clip(audio, -0.95, 0.95)
             logger.info(f"Normalized quiet audio: peak={peak:.6f} → gain={gain:.1f}x")
@@ -286,16 +286,16 @@ class TranscriptionWorker(QThread):
             audio,
             language="en",
             initial_prompt=INITIAL_PROMPT,
-            vad_filter=True,           # filter silence — prevents prompt-echo hallucinations
+            vad_filter=True,           # filter silence segments for cleaner results
             vad_parameters=dict(
-                min_silence_duration_ms=500,   # 0.5 s silence → split
-                speech_pad_ms=200,             # keep 200 ms around speech
+                min_silence_duration_ms=300,   # short pauses OK
+                speech_pad_ms=200,             # pad speech edges to avoid clipping words
             ),
             beam_size=5,
             best_of=3,
             temperature=0.0,
-            no_speech_threshold=0.5,   # higher = more aggressive silence skip
-            condition_on_previous_text=False,
+            no_speech_threshold=0.35,  # lower = keep more quiet speech
+            condition_on_previous_text=True,   # use previous chunk context for continuity
         )
 
         raw = " ".join(seg.text for seg in segments).strip()

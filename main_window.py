@@ -235,6 +235,76 @@ class TranscriptCard(QFrame):
         lay.addWidget(body)
 
 
+def _md_to_html(md: str) -> str:
+    """Convert lightweight markdown (bold, bullets, numbered lists, headings) to HTML."""
+    html_lines = []
+    in_ul = False
+    in_ol = False
+
+    for line in md.split("\n"):
+        stripped = line.strip()
+
+        # Close open lists if this line is not a list item
+        if in_ul and not stripped.startswith(("- ", "* ")):
+            html_lines.append("</ul>")
+            in_ul = False
+        if in_ol and not re.match(r"^\d+[\.\)]\s", stripped):
+            html_lines.append("</ol>")
+            in_ol = False
+
+        # Blank line → spacing
+        if not stripped:
+            html_lines.append("<br>")
+            continue
+
+        # Headings: ### / ## / #
+        m = re.match(r"^(#{1,3})\s+(.*)", stripped)
+        if m:
+            level = len(m.group(1))
+            tag = f"h{level + 1}"  # ### → h4, ## → h3, # → h2
+            text = _inline_fmt(m.group(2))
+            html_lines.append(f"<{tag} style='color:{PRIMARY}; margin:6px 0 2px 0;'>{text}</{tag}>")
+            continue
+
+        # Unordered bullet: - item or * item
+        if stripped.startswith(("- ", "* ")):
+            if not in_ul:
+                html_lines.append("<ul style='margin:2px 0 2px 16px;'>")
+                in_ul = True
+            text = _inline_fmt(stripped[2:])
+            html_lines.append(f"<li style='margin:1px 0;'>{text}</li>")
+            continue
+
+        # Ordered list: 1. item or 1) item
+        m = re.match(r"^(\d+)[\.\)]\s+(.*)", stripped)
+        if m:
+            if not in_ol:
+                html_lines.append("<ol style='margin:2px 0 2px 16px;'>")
+                in_ol = True
+            text = _inline_fmt(m.group(2))
+            html_lines.append(f"<li style='margin:1px 0;'>{text}</li>")
+            continue
+
+        # Normal paragraph
+        html_lines.append(f"<p style='margin:3px 0;'>{_inline_fmt(stripped)}</p>")
+
+    # Close any open lists
+    if in_ul:
+        html_lines.append("</ul>")
+    if in_ol:
+        html_lines.append("</ol>")
+
+    return "\n".join(html_lines)
+
+
+def _inline_fmt(text: str) -> str:
+    """Convert inline markdown: **bold**, *italic*, `code`."""
+    text = re.sub(r"\*\*(.+?)\*\*", rf"<b style='color:{PRIMARY};'>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"`(.+?)`", rf"<code style='background:{SURFACE2}; padding:1px 4px; border-radius:3px;'>\1</code>", text)
+    return text
+
+
 class AnswerCard(QFrame):
     """An auto-assist Q&A answer card."""
     def __init__(self, question: str, parent=None):
@@ -273,10 +343,14 @@ class AnswerCard(QFrame):
 
     def append_token(self, token: str):
         self._answer_text += token
+        # During streaming show plain text (fast); HTML rendered on finish
+        self._answer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._answer_lbl.setText(self._answer_text + " ▍")
 
     def finish(self, source_type: str = "docs"):
-        self._answer_lbl.setText(self._answer_text)
+        # Convert accumulated markdown to styled HTML
+        self._answer_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._answer_lbl.setText(_md_to_html(self._answer_text))
         badge_color = SUCCESS if source_type == "docs" else "#63b3ed"
         badge_icon  = "📄 Docs" if source_type == "docs" else "🌐 Web"
         badge = QLabel(badge_icon)
@@ -940,8 +1014,6 @@ class MainWindow(QMainWindow):
         "thank you for watching",
         "please like and subscribe",
         "for more information visit",
-        "www.", ".com", ".org", ".net",
-        "microsoft.com", "oracle.com",
         "bye-bye", "goodbye",
     ]
 
