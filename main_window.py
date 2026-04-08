@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QTextEdit, QFileDialog,
     QSplitter, QFrame, QScrollArea, QProgressBar, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QSizePolicy
+    QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QTabWidget
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QSize
@@ -179,6 +179,32 @@ QProgressBar::chunk {{
 QSplitter::handle {{
     background-color: {BORDER};
     width: 1px;
+}}
+QTabWidget::pane {{
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    background-color: {DARK_BG};
+}}
+QTabBar::tab {{
+    background-color: {SURFACE};
+    color: {TEXT_MUTED};
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 10px 24px;
+    font-weight: 600;
+    font-size: 13px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background-color: {DARK_BG};
+    color: {PRIMARY};
+    border-bottom: 2px solid {PRIMARY};
+}}
+QTabBar::tab:hover {{
+    color: {TEXT};
+    background-color: {SURFACE2};
 }}
 """
 
@@ -373,6 +399,9 @@ class MainWindow(QMainWindow):
         self._search_delay_timer.setSingleShot(True)
         self._search_delay_timer.timeout.connect(self._fire_search)
 
+        # ── Mic Assistant widget (lazy — created when tab first shown) ─────
+        self._mic_widget = None
+
         self._build_ui()
         self._refresh_devices()
         self._qa.start_service()
@@ -383,7 +412,18 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(STYLE_SHEET)
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # ── Tab widget ─────────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+        outer.addWidget(self._tabs)
+
+        # Tab 1: Live Q&A (original content)
+        qa_page = QWidget()
+        root = QVBoxLayout(qa_page)
         root.setContentsMargins(18, 14, 18, 14)
         root.setSpacing(12)
 
@@ -614,6 +654,10 @@ class MainWindow(QMainWindow):
         status_bar.addWidget(self._bottom_status)
         root.addLayout(status_bar)
 
+        # ── Register tabs ──────────────────────────────────────────────────
+        self._tabs.addTab(qa_page, "Live Q&A")
+        self._tabs.addTab(QWidget(), "Mic Assistant")   # placeholder — loaded lazily
+
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _make_card(self) -> QFrame:
@@ -627,6 +671,16 @@ class MainWindow(QMainWindow):
             f"color: {TEXT_MUTED}; font-size: 10px; font-weight: 700;"
         )
         return lbl
+
+    def _on_tab_changed(self, index: int):
+        """Lazily create the Mic Assistant widget when its tab is first shown."""
+        if index == 1 and self._mic_widget is None:
+            from mic_assistant import MicAssistantWidget, STYLE as MIC_STYLE
+            self._mic_widget = MicAssistantWidget()
+            self._mic_widget.setStyleSheet(MIC_STYLE)
+            self._tabs.removeTab(1)
+            self._tabs.insertTab(1, self._mic_widget, "Mic Assistant")
+            self._tabs.setCurrentIndex(1)
 
     def _set_status(self, text: str, color: str = TEXT_MUTED):
         self._status_lbl.setText(text)
@@ -1110,6 +1164,11 @@ class MainWindow(QMainWindow):
     # ── Keyboard shortcuts ─────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
+        # If Mic Assistant tab is active, forward keys to it
+        if self._tabs.currentIndex() == 1 and self._mic_widget is not None:
+            self._mic_widget.keyPressEvent(event)
+            return
+
         if event.key() == Qt.Key.Key_Space:
             # Don't intercept Space when typing in the question input
             if self._question_input.hasFocus():
@@ -1140,6 +1199,12 @@ class MainWindow(QMainWindow):
                 self._qa._thread.wait(3000)
         except Exception:
             pass
+        # Clean up Mic Assistant tab if it was created
+        if self._mic_widget is not None:
+            try:
+                self._mic_widget.cleanup()
+            except Exception:
+                pass
         event.accept()
 
 

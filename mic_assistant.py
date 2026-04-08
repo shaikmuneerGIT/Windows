@@ -373,14 +373,13 @@ class _LLMThread(QThread):
             return ""
 
 
-# ── Main Window ────────────────────────────────────────────────────────────────
+# ── Mic Assistant Widget (embeddable in any parent) ────────────────────────────
 
-class MicAssistant(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Mic Assistant — Speak & Get AI Answers")
-        self.setMinimumSize(750, 580)
-        self.resize(820, 620)
+class MicAssistantWidget(QWidget):
+    """Self-contained mic-to-AI widget. Can be used standalone or inside tabs."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
         # State
         self._recording = False
@@ -426,10 +425,7 @@ class MicAssistant(QMainWindow):
     # ── UI ─────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.setStyleSheet(STYLE)
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QVBoxLayout(self)
         root.setContentsMargins(14, 10, 14, 10)
         root.setSpacing(10)
 
@@ -796,7 +792,8 @@ class MicAssistant(QMainWindow):
             return
         super().keyPressEvent(event)
 
-    def closeEvent(self, event):
+    def cleanup(self):
+        """Stop all workers. Call before closing the parent window."""
         try:
             self._audio.stop()
         except Exception:
@@ -812,6 +809,26 @@ class MicAssistant(QMainWindow):
                 self._llm._thread.wait(3000)
         except Exception:
             pass
+
+
+class MicAssistant(QMainWindow):
+    """Standalone window wrapper around MicAssistantWidget."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Mic Assistant — Speak & Get AI Answers")
+        self.setMinimumSize(750, 580)
+        self.resize(820, 620)
+        self.setStyleSheet(STYLE)
+        self._widget = MicAssistantWidget()
+        self.setCentralWidget(self._widget)
+
+    def keyPressEvent(self, event):
+        # Forward to widget
+        self._widget.keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self._widget.cleanup()
         event.accept()
 
 
